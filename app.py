@@ -1,7 +1,7 @@
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                             QHBoxLayout, QLabel, QPushButton, QTextEdit)
 from PyQt5.QtGui import QTextCharFormat, QColor, QSyntaxHighlighter, QFont
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
 from difflib import SequenceMatcher
 import sys
 
@@ -51,6 +51,36 @@ class DiffHighlighter(QSyntaxHighlighter):
             elif tag == 'replace':
                 # Show modifications in orange
                 self.setFormat(i1, i2 - i1, self.modification_format)
+
+class ComparisonWorker(QThread):
+    """Worker thread for handling text comparison"""
+    finished = pyqtSignal(list, int)
+    
+    def __init__(self, text1, text2):
+        super().__init__()
+        self.text1 = text1
+        self.text2 = text2
+    
+    def run(self):
+        try:
+            diff_content = []
+            matcher = SequenceMatcher(None, self.text1, self.text2)
+            diff_count = 0
+            
+            for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+                if tag != 'equal':
+                    diff_count += 1
+                    if tag == 'delete':
+                        diff_content.append(f'Deleted: "{self.text1[i1:i2]}" at position {i1}')
+                    elif tag == 'insert':
+                        diff_content.append(f'Inserted: "{self.text2[j1:j2]}" at position {j1}')
+                    elif tag == 'replace':
+                        diff_content.append(f'Changed: "{self.text1[i1:i2]}" → "{self.text2[j1:j2]}"')
+            
+            self.finished.emit(diff_content, diff_count)
+        except Exception as e:
+            print(f"Error in comparison worker: {e}")
+            self.finished.emit([], 0)
 
 class StringComparisonApp(QMainWindow):
     def __init__(self):
@@ -141,6 +171,10 @@ class StringComparisonApp(QMainWindow):
         self.update_timer.setSingleShot(True)
         self.update_timer.timeout.connect(self.update_comparison)
         
+        # Add after other initialization code
+        self.comparison_worker = None
+        self.update_pending = False
+        
         # Style the window
         self.setStyleSheet("""
             QMainWindow {
@@ -161,7 +195,10 @@ class StringComparisonApp(QMainWindow):
         """)
 
     def schedule_update(self):
-        self.update_timer.start(300)
+        """Schedule an update with debouncing"""
+        if not self.update_timer.isActive():
+            self.update_timer.start(500)  # Increased delay for better performance
+        self.update_pending = True
 
     def standardize_text(self, text):
         """Standardize text formatting regardless of input source"""
@@ -170,49 +207,19 @@ class StringComparisonApp(QMainWindow):
         return text
 
     def update_comparison(self):
+        if not self.update_pending:
+            return
+        self.update_pending = False
+        
         try:
             # Store current positions
             scroll1 = self.text1.verticalScrollBar().value()
             scroll2 = self.text2.verticalScrollBar().value()
             scroll_diff = self.diff_view.verticalScrollBar().value()
             
-            # Store cursor positions and selections
-            cursor1 = self.text1.textCursor()
-            cursor2 = self.text2.textCursor()
-            cursor1_pos = cursor1.position()
-            cursor2_pos = cursor2.position()
-            cursor1_anchor = cursor1.anchor()
-            cursor2_anchor = cursor2.anchor()
-            
-            self.highlighter1.enabled = False
-            self.highlighter2.enabled = False
-            
-            # Get and standardize the text from both editors
-            text1 = self.text1.toPlainText()  # Don't standardize during comparison
+            # Get text content
+            text1 = self.text1.toPlainText()
             text2 = self.text2.toPlainText()
-            
-            # Update the text editors without triggering the update
-            self.text1.blockSignals(True)
-            self.text2.blockSignals(True)
-            
-            # Restore cursor positions and selections
-            text1_len = len(text1)
-            text2_len = len(text2)
-            
-            cursor1.setPosition(min(cursor1_anchor, text1_len))
-            cursor1.setPosition(min(cursor1_pos, text1_len), cursor1.KeepAnchor)
-            cursor2.setPosition(min(cursor2_anchor, text2_len))
-            cursor2.setPosition(min(cursor2_pos, text2_len), cursor2.KeepAnchor)
-            
-            self.text1.setTextCursor(cursor1)
-            self.text2.setTextCursor(cursor2)
-            
-            self.text1.blockSignals(False)
-            self.text2.blockSignals(False)
-            
-            # Restore scroll positions
-            self.text1.verticalScrollBar().setValue(scroll1)
-            self.text2.verticalScrollBar().setValue(scroll2)
             
             # Update word counts
             words1 = len(text1.split()) if text1.strip() else 0
@@ -223,33 +230,41 @@ class StringComparisonApp(QMainWindow):
             self.word_count1.setText(f"Words: {words1}  Characters: {chars1}")
             self.word_count2.setText(f"Words: {words2}  Characters: {chars2}")
             
+            # Start comparison in background
+            if self.comparison_worker and self.comparison_worker.isRunning():
+                self.comparison_worker.terminate()
+                self.comparison_worker.wait()
+            
+            self.comparison_worker = ComparisonWorker(text1, text2)
+            self.comparison_worker.finished.connect(
+                lambda diff_content, diff_count: self.update_diff_view(
+                    diff_content, diff_count, text1, text2, scroll_diff
+                )
+            )
+            self.comparison_worker.start()
+            
             # Update highlighters
+            self.highlighter1.enabled = True
+            self.highlighter2.enabled = True
             self.highlighter1.set_other_text(text2)
             self.highlighter2.set_other_text(text1)
             
-            # Before updating diff view, store its content
-            diff_content = []
-            matcher = SequenceMatcher(None, text1, text2)
-            for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-                if tag == 'equal':
-                    continue
-                elif tag == 'delete':
-                    diff_content.append(f'Deleted: "{text1[i1:i2]}" at position {i1}')
-                elif tag == 'insert':
-                    diff_content.append(f'Inserted: "{text2[j1:j2]}" at position {j1}')
-                elif tag == 'replace':
-                    diff_content.append(f'Changed: "{text1[i1:i2]}" → "{text2[j1:j2]}"')
+            # Restore scroll positions
+            self.text1.verticalScrollBar().setValue(scroll1)
+            self.text2.verticalScrollBar().setValue(scroll2)
             
-            # Update diff view while maintaining scroll position
+        except Exception as e:
+            print(f"Error in update_comparison: {e}")
+            self.highlighter1.enabled = True
+            self.highlighter2.enabled = True
+
+    def update_diff_view(self, diff_content, diff_count, text1, text2, scroll_diff):
+        """Update the diff view with the comparison results"""
+        try:
             self.diff_view.clear()
             for line in diff_content:
                 self.diff_view.append(line)
             self.diff_view.verticalScrollBar().setValue(scroll_diff)
-            
-            self.highlighter1.enabled = True
-            self.highlighter2.enabled = True
-            self.highlighter1.rehighlight()
-            self.highlighter2.rehighlight()
             
             # Update status
             if not text1 and not text2:
@@ -259,17 +274,11 @@ class StringComparisonApp(QMainWindow):
                 self.status_label.setText("✓ Texts are identical")
                 self.status_label.setStyleSheet("padding: 10px; border-radius: 5px; background-color: #c8e6c9;")
             else:
-                diff_count = sum(1 for tag, i1, i2, j1, j2 in matcher.get_opcodes() if tag != 'equal')
                 self.status_label.setText(f"⚠ Texts are different (Found {diff_count} differences)")
                 self.status_label.setStyleSheet("padding: 10px; border-radius: 5px; background-color: #ffcdd2;")
-            
+                
         except Exception as e:
-            print(f"Error in update_comparison: {e}")
-            # Ensure signals are unblocked even if an error occurs
-            self.text1.blockSignals(False)
-            self.text2.blockSignals(False)
-            self.highlighter1.enabled = True
-            self.highlighter2.enabled = True
+            print(f"Error in update_diff_view: {e}")
 
     def create_text_edit(self, font_size=11):
         """Create a QTextEdit with proper scroll behavior"""
