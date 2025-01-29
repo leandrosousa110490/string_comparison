@@ -1,7 +1,7 @@
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                             QHBoxLayout, QLabel, QPushButton, QTextEdit)
 from PyQt5.QtGui import QTextCharFormat, QColor, QSyntaxHighlighter, QFont
-from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
+from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QDateTime
 from difflib import SequenceMatcher
 import sys
 
@@ -55,32 +55,78 @@ class DiffHighlighter(QSyntaxHighlighter):
 class ComparisonWorker(QThread):
     """Worker thread for handling text comparison"""
     finished = pyqtSignal(list, int)
+    progress = pyqtSignal(int)
+    error = pyqtSignal(str)
     
-    def __init__(self, text1, text2):
+    def __init__(self, text1, text2, max_diff=500, chunk_size=1000):  # Reduced limits
         super().__init__()
-        self.text1 = text1
-        self.text2 = text2
+        # Safely truncate input texts
+        self.text1 = text1[:500000] if text1 else ""  # Limit to 500KB
+        self.text2 = text2[:500000] if text2 else ""
+        self.max_diff = max_diff
+        self.chunk_size = chunk_size
+        self._is_running = True
+        self._error_occurred = False
+    
+    def stop(self):
+        self._is_running = False
     
     def run(self):
+        if not self._is_running or self._error_occurred:
+            return
+            
         try:
             diff_content = []
-            matcher = SequenceMatcher(None, self.text1, self.text2)
             diff_count = 0
             
+            # Use quick_ratio first to check similarity
+            matcher = SequenceMatcher(None, self.text1, self.text2, autojunk=False)
+            if matcher.quick_ratio() < 0.1:  # Texts are very different
+                self.error.emit("Texts are too different for detailed comparison")
+                return
+            
             for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+                if not self._is_running or self._error_occurred:
+                    return
+                
                 if tag != 'equal':
                     diff_count += 1
-                    if tag == 'delete':
-                        diff_content.append(f'Deleted: "{self.text1[i1:i2]}" at position {i1}')
-                    elif tag == 'insert':
-                        diff_content.append(f'Inserted: "{self.text2[j1:j2]}" at position {j1}')
-                    elif tag == 'replace':
-                        diff_content.append(f'Changed: "{self.text1[i1:i2]}" → "{self.text2[j1:j2]}"')
+                    if diff_count > self.max_diff:
+                        diff_content.append("... (too many differences to display)")
+                        break
+                    
+                    try:
+                        if i2 - i1 > self.chunk_size or j2 - j1 > self.chunk_size:
+                            diff_content.append(f"... (difference at position {i1} too large to display)")
+                            continue
+                            
+                        if tag == 'delete':
+                            text = self.text1[i1:i2][:100]
+                            diff_content.append(f'Deleted: "{text}"' + ("..." if len(text) == 100 else ""))
+                        elif tag == 'insert':
+                            text = self.text2[j1:j2][:100]
+                            diff_content.append(f'Inserted: "{text}"' + ("..." if len(text) == 100 else ""))
+                        elif tag == 'replace':
+                            text1 = self.text1[i1:i2][:50]
+                            text2 = self.text2[j1:j2][:50]
+                            diff_content.append(f'Changed: "{text1}" → "{text2}"' + 
+                                             ("..." if len(text1) == 50 or len(text2) == 50 else ""))
+                    except Exception as e:
+                        print(f"Error processing diff chunk: {e}")
+                        continue
+                
+                if diff_count % 10 == 0:  # Reduced progress updates
+                    self.progress.emit(diff_count)
             
-            self.finished.emit(diff_content, diff_count)
+            if self._is_running and not self._error_occurred:
+                self.finished.emit(diff_content, diff_count)
+                
+        except MemoryError:
+            self._error_occurred = True
+            self.error.emit("Out of memory - text too large to compare")
         except Exception as e:
-            print(f"Error in comparison worker: {e}")
-            self.finished.emit([], 0)
+            self._error_occurred = True
+            self.error.emit(f"Comparison error: {str(e)}")
 
 class StringComparisonApp(QMainWindow):
     def __init__(self):
@@ -157,6 +203,8 @@ class StringComparisonApp(QMainWindow):
         self.diff_view = self.create_text_edit(font_size=10)
         self.diff_view.setReadOnly(True)
         self.diff_view.setMaximumHeight(150)
+        self.diff_view.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        self.diff_view.setLineWrapMode(QTextEdit.NoWrap)  # Prevent line wrapping
         layout.addWidget(QLabel("Detailed Changes:"))
         layout.addWidget(self.diff_view)
         
@@ -174,6 +222,9 @@ class StringComparisonApp(QMainWindow):
         # Add after other initialization code
         self.comparison_worker = None
         self.update_pending = False
+        self.max_text_size = 500000  # Reduced to 500KB
+        self.last_comparison_time = 0
+        self.comparison_cooldown = 1000  # 1 second cooldown
         
         # Style the window
         self.setStyleSheet("""
@@ -209,62 +260,111 @@ class StringComparisonApp(QMainWindow):
     def update_comparison(self):
         if not self.update_pending:
             return
+            
+        current_time = QDateTime.currentMSecsSinceEpoch()
+        if current_time - self.last_comparison_time < self.comparison_cooldown:
+            # Reschedule update
+            self.update_timer.start(self.comparison_cooldown)
+            return
+            
         self.update_pending = False
+        self.last_comparison_time = current_time
         
         try:
-            # Store current positions
-            scroll1 = self.text1.verticalScrollBar().value()
-            scroll2 = self.text2.verticalScrollBar().value()
-            scroll_diff = self.diff_view.verticalScrollBar().value()
+            # Get text content with size limits
+            text1 = self.text1.toPlainText()[:self.max_text_size]
+            text2 = self.text2.toPlainText()[:self.max_text_size]
             
-            # Get text content
-            text1 = self.text1.toPlainText()
-            text2 = self.text2.toPlainText()
-            
-            # Update word counts
-            words1 = len(text1.split()) if text1.strip() else 0
-            chars1 = len(text1)
-            words2 = len(text2.split()) if text2.strip() else 0
-            chars2 = len(text2)
-            
-            self.word_count1.setText(f"Words: {words1}  Characters: {chars1}")
-            self.word_count2.setText(f"Words: {words2}  Characters: {chars2}")
-            
-            # Start comparison in background
-            if self.comparison_worker and self.comparison_worker.isRunning():
-                self.comparison_worker.terminate()
-                self.comparison_worker.wait()
-            
-            self.comparison_worker = ComparisonWorker(text1, text2)
-            self.comparison_worker.finished.connect(
-                lambda diff_content, diff_count: self.update_diff_view(
-                    diff_content, diff_count, text1, text2, scroll_diff
+            # Basic validation
+            if len(text1) == 0 and len(text2) == 0:
+                self.status_label.setText("Enter text to compare")
+                return
+                
+            if len(text1) >= self.max_text_size or len(text2) >= self.max_text_size:
+                self.status_label.setText("⚠ Text truncated - too large for full comparison")
+                self.status_label.setStyleSheet(
+                    "padding: 10px; border-radius: 5px; background-color: #fff3cd;"
                 )
+            
+            # Safely stop previous worker
+            self.stop_current_worker()
+            
+            # Create new worker with reduced limits
+            self.comparison_worker = ComparisonWorker(
+                text1, 
+                text2, 
+                max_diff=500,
+                chunk_size=1000
             )
+            
+            # Connect signals with proper cleanup
+            self.connect_worker_signals()
+            
+            # Start comparison
             self.comparison_worker.start()
             
-            # Update highlighters
-            self.highlighter1.enabled = True
-            self.highlighter2.enabled = True
-            self.highlighter1.set_other_text(text2)
-            self.highlighter2.set_other_text(text1)
-            
-            # Restore scroll positions
-            self.text1.verticalScrollBar().setValue(scroll1)
-            self.text2.verticalScrollBar().setValue(scroll2)
+            # Update word counts and highlighters only for smaller texts
+            if len(text1) < 100000 and len(text2) < 100000:
+                self.update_word_counts(text1, text2)
+                self.update_highlighters(text1, text2)
             
         except Exception as e:
             print(f"Error in update_comparison: {e}")
-            self.highlighter1.enabled = True
-            self.highlighter2.enabled = True
+            self.handle_comparison_error(str(e))
+    
+    def stop_current_worker(self):
+        """Safely stop the current worker thread"""
+        if self.comparison_worker and self.comparison_worker.isRunning():
+            try:
+                self.comparison_worker.stop()
+                self.comparison_worker.wait(500)
+                if self.comparison_worker.isRunning():
+                    self.comparison_worker.terminate()
+                    self.comparison_worker.wait()
+            except Exception as e:
+                print(f"Error stopping worker: {e}")
+    
+    def connect_worker_signals(self):
+        """Connect worker signals with proper cleanup"""
+        try:
+            # Disconnect any existing connections
+            if self.comparison_worker:
+                try:
+                    self.comparison_worker.finished.disconnect()
+                    self.comparison_worker.error.disconnect()
+                    self.comparison_worker.progress.disconnect()
+                except Exception:
+                    pass  # Ignore disconnection errors
+                
+            # Connect new signals
+            self.comparison_worker.finished.connect(
+                lambda diff_content, diff_count: self.update_diff_view(
+                    diff_content, diff_count, self.text1.toPlainText(), self.text2.toPlainText()
+                )
+            )
+            self.comparison_worker.error.connect(self.handle_comparison_error)
+            self.comparison_worker.progress.connect(self.update_progress)
+        except Exception as e:
+            print(f"Error connecting signals: {e}")
 
-    def update_diff_view(self, diff_content, diff_count, text1, text2, scroll_diff):
+    def handle_comparison_error(self, error_message):
+        """Handle comparison errors gracefully"""
+        self.status_label.setText(f"⚠ {error_message}")
+        self.status_label.setStyleSheet(
+            "padding: 10px; border-radius: 5px; background-color: #ffcdd2;"
+        )
+        
+    def update_progress(self, count):
+        """Update the status with progress information"""
+        if count % 100 == 0:  # Update every 100 differences
+            self.status_label.setText(f"Processing... (Found {count} differences)")
+
+    def update_diff_view(self, diff_content, diff_count, text1, text2):
         """Update the diff view with the comparison results"""
         try:
             self.diff_view.clear()
             for line in diff_content:
                 self.diff_view.append(line)
-            self.diff_view.verticalScrollBar().setValue(scroll_diff)
             
             # Update status
             if not text1 and not text2:
@@ -320,6 +420,30 @@ class StringComparisonApp(QMainWindow):
         text_edit.cursorPositionChanged.connect(store_cursor_pos)
         
         return text_edit
+
+    def update_word_counts(self, text1, text2):
+        """Update word counts in the UI"""
+        try:
+            words1 = len(text1.split()) if text1.strip() else 0
+            chars1 = len(text1)
+            words2 = len(text2.split()) if text2.strip() else 0
+            chars2 = len(text2)
+            
+            self.word_count1.setText(f"Words: {words1}  Characters: {chars1}")
+            self.word_count2.setText(f"Words: {words2}  Characters: {chars2}")
+        except Exception as e:
+            print(f"Error updating word counts: {e}")
+
+    def update_highlighters(self, text1, text2):
+        """Update highlighters in the UI"""
+        try:
+            self.highlighter1.enabled = len(text1) < self.max_text_size
+            self.highlighter2.enabled = len(text2) < self.max_text_size
+            if self.highlighter1.enabled and self.highlighter2.enabled:
+                self.highlighter1.set_other_text(text2)
+                self.highlighter2.set_other_text(text1)
+        except Exception as e:
+            print(f"Error updating highlighters: {e}")
 
 def main():
     app = QApplication(sys.argv)
