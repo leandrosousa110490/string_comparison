@@ -92,7 +92,7 @@ class StringComparisonApp(QMainWindow):
         left_layout = QVBoxLayout()
         self.left_label = QLabel("Original Text")
         self.left_label.setStyleSheet("font-weight: bold; font-size: 14px;")
-        self.text1 = QTextEdit()
+        self.text1 = self.create_text_edit()
         self.text1.textChanged.connect(self.schedule_update)
         self.word_count1 = QLabel("Words: 0  Characters: 0")
         
@@ -104,7 +104,7 @@ class StringComparisonApp(QMainWindow):
         right_layout = QVBoxLayout()
         self.right_label = QLabel("Modified Text")
         self.right_label.setStyleSheet("font-weight: bold; font-size: 14px;")
-        self.text2 = QTextEdit()
+        self.text2 = self.create_text_edit()
         self.text2.textChanged.connect(self.schedule_update)
         self.word_count2 = QLabel("Words: 0  Characters: 0")
         
@@ -124,10 +124,9 @@ class StringComparisonApp(QMainWindow):
         layout.addLayout(editors_layout)
         
         # Create detailed diff view
-        self.diff_view = QTextEdit()
+        self.diff_view = self.create_text_edit(font_size=10)
         self.diff_view.setReadOnly(True)
         self.diff_view.setMaximumHeight(150)
-        self.diff_view.setFont(QFont("Consolas", 10))
         layout.addWidget(QLabel("Detailed Changes:"))
         layout.addWidget(self.diff_view)
         
@@ -152,8 +151,9 @@ class StringComparisonApp(QMainWindow):
                 border-radius: 5px;
                 padding: 5px;
                 background-color: white;
-                font-family: Consolas, Monaco, monospace;
-                font-size: 12px;
+                font-family: Consolas, Monaco, monospace !important;
+                font-size: 11px !important;
+                line-height: 1.4;
             }
             QLabel {
                 color: #424242;
@@ -163,12 +163,47 @@ class StringComparisonApp(QMainWindow):
     def schedule_update(self):
         self.update_timer.start(300)
 
+    def standardize_text(self, text):
+        """Standardize text formatting regardless of input source"""
+        # Remove any special Unicode whitespace characters
+        text = ' '.join(text.split())
+        return text
+
     def update_comparison(self):
+        # Store current positions
+        scroll1 = self.text1.verticalScrollBar().value()
+        scroll2 = self.text2.verticalScrollBar().value()
+        scroll_diff = self.diff_view.verticalScrollBar().value()
+        cursor1_pos = self.text1.textCursor().position()
+        cursor2_pos = self.text2.textCursor().position()
+        
         self.highlighter1.enabled = False
         self.highlighter2.enabled = False
         
-        text1 = self.text1.toPlainText()
-        text2 = self.text2.toPlainText()
+        # Get and standardize the text from both editors
+        text1 = self.standardize_text(self.text1.toPlainText())
+        text2 = self.standardize_text(self.text2.toPlainText())
+        
+        # Update the text editors with standardized text without triggering the update
+        self.text1.blockSignals(True)
+        self.text2.blockSignals(True)
+        self.text1.setPlainText(text1)
+        self.text2.setPlainText(text2)
+        
+        # Restore cursor positions
+        cursor1 = self.text1.textCursor()
+        cursor2 = self.text2.textCursor()
+        cursor1.setPosition(min(cursor1_pos, len(text1)))
+        cursor2.setPosition(min(cursor2_pos, len(text2)))
+        self.text1.setTextCursor(cursor1)
+        self.text2.setTextCursor(cursor2)
+        
+        self.text1.blockSignals(False)
+        self.text2.blockSignals(False)
+        
+        # Restore scroll positions
+        self.text1.verticalScrollBar().setValue(scroll1)
+        self.text2.verticalScrollBar().setValue(scroll2)
         
         # Update word counts
         words1 = len(text1.split()) if text1.strip() else 0
@@ -183,18 +218,24 @@ class StringComparisonApp(QMainWindow):
         self.highlighter1.set_other_text(text2)
         self.highlighter2.set_other_text(text1)
         
-        # Update detailed diff view
-        self.diff_view.clear()
+        # Before updating diff view, store its content
+        diff_content = []
         matcher = SequenceMatcher(None, text1, text2)
         for tag, i1, i2, j1, j2 in matcher.get_opcodes():
             if tag == 'equal':
                 continue
             elif tag == 'delete':
-                self.diff_view.append(f'Deleted: "{text1[i1:i2]}" at position {i1}')
+                diff_content.append(f'Deleted: "{text1[i1:i2]}" at position {i1}')
             elif tag == 'insert':
-                self.diff_view.append(f'Inserted: "{text2[j1:j2]}" at position {j1}')
+                diff_content.append(f'Inserted: "{text2[j1:j2]}" at position {j1}')
             elif tag == 'replace':
-                self.diff_view.append(f'Changed: "{text1[i1:i2]}" → "{text2[j1:j2]}"')
+                diff_content.append(f'Changed: "{text1[i1:i2]}" → "{text2[j1:j2]}"')
+        
+        # Update diff view while maintaining scroll position
+        self.diff_view.clear()
+        for line in diff_content:
+            self.diff_view.append(line)
+        self.diff_view.verticalScrollBar().setValue(scroll_diff)
         
         self.highlighter1.enabled = True
         self.highlighter2.enabled = True
@@ -212,6 +253,37 @@ class StringComparisonApp(QMainWindow):
             diff_count = sum(1 for tag, i1, i2, j1, j2 in matcher.get_opcodes() if tag != 'equal')
             self.status_label.setText(f"⚠ Texts are different (Found {diff_count} differences)")
             self.status_label.setStyleSheet("padding: 10px; border-radius: 5px; background-color: #ffcdd2;")
+
+    def create_text_edit(self, font_size=11):
+        """Create a QTextEdit with proper scroll behavior"""
+        text_edit = QTextEdit()
+        text_edit.setFont(QFont("Consolas", font_size))
+        text_edit.setAcceptRichText(False)
+        
+        # Get the vertical scrollbar
+        scrollbar = text_edit.verticalScrollBar()
+        
+        # Store the current cursor position
+        last_cursor_pos = 0
+        
+        def store_cursor_pos():
+            nonlocal last_cursor_pos
+            last_cursor_pos = text_edit.textCursor().position()
+        
+        # Prevent automatic scrolling by maintaining scroll position and cursor
+        def maintain_scroll(value):
+            if not text_edit.hasFocus():
+                scrollbar.setValue(value)
+                # Restore cursor position
+                cursor = text_edit.textCursor()
+                cursor.setPosition(last_cursor_pos)
+                text_edit.setTextCursor(cursor)
+        
+        # Connect signals
+        scrollbar.valueChanged.connect(maintain_scroll)
+        text_edit.cursorPositionChanged.connect(store_cursor_pos)
+        
+        return text_edit
 
 def main():
     app = QApplication(sys.argv)
