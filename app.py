@@ -170,89 +170,106 @@ class StringComparisonApp(QMainWindow):
         return text
 
     def update_comparison(self):
-        # Store current positions
-        scroll1 = self.text1.verticalScrollBar().value()
-        scroll2 = self.text2.verticalScrollBar().value()
-        scroll_diff = self.diff_view.verticalScrollBar().value()
-        cursor1_pos = self.text1.textCursor().position()
-        cursor2_pos = self.text2.textCursor().position()
-        
-        self.highlighter1.enabled = False
-        self.highlighter2.enabled = False
-        
-        # Get and standardize the text from both editors
-        text1 = self.standardize_text(self.text1.toPlainText())
-        text2 = self.standardize_text(self.text2.toPlainText())
-        
-        # Update the text editors with standardized text without triggering the update
-        self.text1.blockSignals(True)
-        self.text2.blockSignals(True)
-        self.text1.setPlainText(text1)
-        self.text2.setPlainText(text2)
-        
-        # Restore cursor positions
-        cursor1 = self.text1.textCursor()
-        cursor2 = self.text2.textCursor()
-        cursor1.setPosition(min(cursor1_pos, len(text1)))
-        cursor2.setPosition(min(cursor2_pos, len(text2)))
-        self.text1.setTextCursor(cursor1)
-        self.text2.setTextCursor(cursor2)
-        
-        self.text1.blockSignals(False)
-        self.text2.blockSignals(False)
-        
-        # Restore scroll positions
-        self.text1.verticalScrollBar().setValue(scroll1)
-        self.text2.verticalScrollBar().setValue(scroll2)
-        
-        # Update word counts
-        words1 = len(text1.split()) if text1.strip() else 0
-        chars1 = len(text1)
-        words2 = len(text2.split()) if text2.strip() else 0
-        chars2 = len(text2)
-        
-        self.word_count1.setText(f"Words: {words1}  Characters: {chars1}")
-        self.word_count2.setText(f"Words: {words2}  Characters: {chars2}")
-        
-        # Update highlighters
-        self.highlighter1.set_other_text(text2)
-        self.highlighter2.set_other_text(text1)
-        
-        # Before updating diff view, store its content
-        diff_content = []
-        matcher = SequenceMatcher(None, text1, text2)
-        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-            if tag == 'equal':
-                continue
-            elif tag == 'delete':
-                diff_content.append(f'Deleted: "{text1[i1:i2]}" at position {i1}')
-            elif tag == 'insert':
-                diff_content.append(f'Inserted: "{text2[j1:j2]}" at position {j1}')
-            elif tag == 'replace':
-                diff_content.append(f'Changed: "{text1[i1:i2]}" → "{text2[j1:j2]}"')
-        
-        # Update diff view while maintaining scroll position
-        self.diff_view.clear()
-        for line in diff_content:
-            self.diff_view.append(line)
-        self.diff_view.verticalScrollBar().setValue(scroll_diff)
-        
-        self.highlighter1.enabled = True
-        self.highlighter2.enabled = True
-        self.highlighter1.rehighlight()
-        self.highlighter2.rehighlight()
-        
-        # Update status
-        if not text1 and not text2:
-            self.status_label.setText("Enter text to compare")
-            self.status_label.setStyleSheet("padding: 10px; border-radius: 5px; background-color: #e3f2fd;")
-        elif text1 == text2:
-            self.status_label.setText("✓ Texts are identical")
-            self.status_label.setStyleSheet("padding: 10px; border-radius: 5px; background-color: #c8e6c9;")
-        else:
-            diff_count = sum(1 for tag, i1, i2, j1, j2 in matcher.get_opcodes() if tag != 'equal')
-            self.status_label.setText(f"⚠ Texts are different (Found {diff_count} differences)")
-            self.status_label.setStyleSheet("padding: 10px; border-radius: 5px; background-color: #ffcdd2;")
+        try:
+            # Store current positions
+            scroll1 = self.text1.verticalScrollBar().value()
+            scroll2 = self.text2.verticalScrollBar().value()
+            scroll_diff = self.diff_view.verticalScrollBar().value()
+            
+            # Store cursor positions and selections
+            cursor1 = self.text1.textCursor()
+            cursor2 = self.text2.textCursor()
+            cursor1_pos = cursor1.position()
+            cursor2_pos = cursor2.position()
+            cursor1_anchor = cursor1.anchor()
+            cursor2_anchor = cursor2.anchor()
+            
+            self.highlighter1.enabled = False
+            self.highlighter2.enabled = False
+            
+            # Get and standardize the text from both editors
+            text1 = self.text1.toPlainText()  # Don't standardize during comparison
+            text2 = self.text2.toPlainText()
+            
+            # Update the text editors without triggering the update
+            self.text1.blockSignals(True)
+            self.text2.blockSignals(True)
+            
+            # Restore cursor positions and selections
+            text1_len = len(text1)
+            text2_len = len(text2)
+            
+            cursor1.setPosition(min(cursor1_anchor, text1_len))
+            cursor1.setPosition(min(cursor1_pos, text1_len), cursor1.KeepAnchor)
+            cursor2.setPosition(min(cursor2_anchor, text2_len))
+            cursor2.setPosition(min(cursor2_pos, text2_len), cursor2.KeepAnchor)
+            
+            self.text1.setTextCursor(cursor1)
+            self.text2.setTextCursor(cursor2)
+            
+            self.text1.blockSignals(False)
+            self.text2.blockSignals(False)
+            
+            # Restore scroll positions
+            self.text1.verticalScrollBar().setValue(scroll1)
+            self.text2.verticalScrollBar().setValue(scroll2)
+            
+            # Update word counts
+            words1 = len(text1.split()) if text1.strip() else 0
+            chars1 = len(text1)
+            words2 = len(text2.split()) if text2.strip() else 0
+            chars2 = len(text2)
+            
+            self.word_count1.setText(f"Words: {words1}  Characters: {chars1}")
+            self.word_count2.setText(f"Words: {words2}  Characters: {chars2}")
+            
+            # Update highlighters
+            self.highlighter1.set_other_text(text2)
+            self.highlighter2.set_other_text(text1)
+            
+            # Before updating diff view, store its content
+            diff_content = []
+            matcher = SequenceMatcher(None, text1, text2)
+            for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+                if tag == 'equal':
+                    continue
+                elif tag == 'delete':
+                    diff_content.append(f'Deleted: "{text1[i1:i2]}" at position {i1}')
+                elif tag == 'insert':
+                    diff_content.append(f'Inserted: "{text2[j1:j2]}" at position {j1}')
+                elif tag == 'replace':
+                    diff_content.append(f'Changed: "{text1[i1:i2]}" → "{text2[j1:j2]}"')
+            
+            # Update diff view while maintaining scroll position
+            self.diff_view.clear()
+            for line in diff_content:
+                self.diff_view.append(line)
+            self.diff_view.verticalScrollBar().setValue(scroll_diff)
+            
+            self.highlighter1.enabled = True
+            self.highlighter2.enabled = True
+            self.highlighter1.rehighlight()
+            self.highlighter2.rehighlight()
+            
+            # Update status
+            if not text1 and not text2:
+                self.status_label.setText("Enter text to compare")
+                self.status_label.setStyleSheet("padding: 10px; border-radius: 5px; background-color: #e3f2fd;")
+            elif text1 == text2:
+                self.status_label.setText("✓ Texts are identical")
+                self.status_label.setStyleSheet("padding: 10px; border-radius: 5px; background-color: #c8e6c9;")
+            else:
+                diff_count = sum(1 for tag, i1, i2, j1, j2 in matcher.get_opcodes() if tag != 'equal')
+                self.status_label.setText(f"⚠ Texts are different (Found {diff_count} differences)")
+                self.status_label.setStyleSheet("padding: 10px; border-radius: 5px; background-color: #ffcdd2;")
+            
+        except Exception as e:
+            print(f"Error in update_comparison: {e}")
+            # Ensure signals are unblocked even if an error occurs
+            self.text1.blockSignals(False)
+            self.text2.blockSignals(False)
+            self.highlighter1.enabled = True
+            self.highlighter2.enabled = True
 
     def create_text_edit(self, font_size=11):
         """Create a QTextEdit with proper scroll behavior"""
@@ -263,20 +280,30 @@ class StringComparisonApp(QMainWindow):
         # Get the vertical scrollbar
         scrollbar = text_edit.verticalScrollBar()
         
-        # Store the current cursor position
+        # Store the current cursor position and selection
         last_cursor_pos = 0
+        last_anchor_pos = 0
         
         def store_cursor_pos():
-            nonlocal last_cursor_pos
-            last_cursor_pos = text_edit.textCursor().position()
+            nonlocal last_cursor_pos, last_anchor_pos
+            cursor = text_edit.textCursor()
+            last_cursor_pos = cursor.position()
+            last_anchor_pos = cursor.anchor()
         
         # Prevent automatic scrolling by maintaining scroll position and cursor
         def maintain_scroll(value):
             if not text_edit.hasFocus():
                 scrollbar.setValue(value)
-                # Restore cursor position
+                # Restore cursor position and selection
                 cursor = text_edit.textCursor()
-                cursor.setPosition(last_cursor_pos)
+                text_length = len(text_edit.toPlainText())
+                
+                # Ensure positions are within valid range
+                pos = min(last_cursor_pos, text_length)
+                anchor = min(last_anchor_pos, text_length)
+                
+                cursor.setPosition(anchor)
+                cursor.setPosition(pos, cursor.KeepAnchor)
                 text_edit.setTextCursor(cursor)
         
         # Connect signals
